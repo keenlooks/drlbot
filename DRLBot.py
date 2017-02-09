@@ -17,9 +17,9 @@ from time import sleep
 
 # Replay memory:
 class ReplayMemory:
-    def __init__(self, capacity, downsampled_x, downsampled_y):
+    def __init__(self, capacity, channels, downsampled_x, downsampled_y):
 
-        state_shape = (capacity, 1, downsampled_y, downsampled_x)
+        state_shape = (capacity, channels, downsampled_y, downsampled_x)
         self.s1 = np.zeros(state_shape, dtype=np.float32)
         self.s2 = np.zeros(state_shape, dtype=np.float32)
         self.a = np.zeros(capacity, dtype=np.int32)
@@ -31,11 +31,11 @@ class ReplayMemory:
         self.oldest_index = 0
 
     def add_transition(self, s1, action, s2, reward):
-        self.s1[self.oldest_index, 0] = s1
+        self.s1[self.oldest_index] = s1
         if s2 is None:
             self.nonterminal[self.oldest_index] = False
         else:
-            self.s2[self.oldest_index, 0] = s2
+            self.s2[self.oldest_index] = s2
             self.nonterminal[self.oldest_index] = True
         self.a[self.oldest_index] = action
         self.r[self.oldest_index] = reward
@@ -73,7 +73,8 @@ class DRLBot:
 
     # Other parameters
     skiprate = 7
-    downsampled_x = 100
+    channels = 3
+    downsampled_x = 128
     downsampled_y = downsampled_x
     episodes_to_watch = 10
 
@@ -100,12 +101,12 @@ class DRLBot:
         self.get_state_f = get_state_f
         self.make_action_f = make_action_f
         self.available_actions_num = available_actions_num
-        self.memory = ReplayMemory(capacity=self.replay_memory_size, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
+        self.memory = ReplayMemory(capacity=self.replay_memory_size, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
         self.dqn, self.learn, self.get_q_values, self.get_best_action = self.create_network(self.available_actions_num)
         
     def convert(self,img):
         img = img.astype(np.float32) / 255.0
-        img = cv2.resize(img, (self.downsampled_x, self.downsampled_y))
+        #img = cv2.resize(img, (self.channels, self.downsampled_x, self.downsampled_y))
         return img
 
     # Creates the network:
@@ -121,7 +122,7 @@ class DRLBot:
 
         # Creates the input layer of the network.
         
-        dqn = InputLayer(shape=[None, 1, self.downsampled_y, self.downsampled_x], input_var=s1)
+        dqn = InputLayer(shape=[None, self.channels, self.downsampled_y, self.downsampled_x], input_var=s1)
         
         
         # Adds 3 convolutional layers, each followed by a max pooling layer.
@@ -185,7 +186,7 @@ class DRLBot:
             a = randint(0, self.available_actions_num - 1)
         else:
             # Chooses the best action according to the network.
-            a = self.get_best_action(s1.reshape([1, 1, self.downsampled_y, self.downsampled_x]))
+            a = self.get_best_action(s1.reshape([1, self.channels, self.downsampled_y, self.downsampled_x]))
         reward = self.make_action_f(a)
         reward *= self.reward_scale
         curr_state = self.get_state_f()

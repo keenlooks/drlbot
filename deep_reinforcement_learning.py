@@ -53,8 +53,8 @@ logger.setLevel(logging.WARNING)#DEBUG) # set to INFO if you want fewer messages
     
 #----------------------------------------------------------------------------------------------------------------------------------
 
-video_width = 300
-video_height = 300
+video_width = 128
+video_height = 128
 channels = 3
 
 #################
@@ -105,11 +105,11 @@ missionXML = '''<?xml version="1.0" encoding="UTF-8" ?>
     <AgentSection mode="Survival">
         <Name>Jason Bourne</Name>
         <AgentStart>
-            <Placement x="-203.5" y="80" z="217.5"/>
+            <Placement x="0" y="80" z="0"/>
         </AgentStart>
         <AgentHandlers>
             <ObservationFromFullStats/>
-            <VideoProducer want_depth="true">
+            <VideoProducer want_depth="false">
                 <Width>''' + str(video_width) + '''</Width>
                 <Height>''' + str(video_height) + '''</Height>
             </VideoProducer>
@@ -184,13 +184,13 @@ def get_minecraft_frame():
         return None
     logger.info("Got frame!")
     pixels = agent_host.peekWorldState().video_frames[0].pixels
-    red,green,blue = pixels[0::4],pixels[1::4],pixels[2::4]
+    #red,green,blue = pixels[0::4],pixels[1::4],pixels[2::4]
     #pixels_averaged = [int(np.mean([re,ge,be])) for re,ge,be in zip(red,green,blue)]
     #green.extend(blue)
     #red.extend(green)
     #pixels_no_depth = red
-    #return np.reshape(np.mat(pixels_no_depth,dtype=np.float32),(channels,video_width,video_height),order='C')
-    return np.reshape(np.mat(green,dtype=np.float32),(video_width,video_height),order='C')
+    return np.reshape(pixels,(channels,video_width,video_height),order='F')
+    #return np.reshape(np.mat(green,dtype=np.float32),(video_width,video_height),order='C')
 
     
 def make_minecraft_action(action_i):
@@ -202,7 +202,7 @@ def make_minecraft_action(action_i):
     for reward in rewards:
         total_reward += reward.getValue()
     if is_agent_in_new_area():
-        total_reward+=5
+        total_reward += 5
    #print "reward for this move: "+str(total_reward)
     return total_reward
     
