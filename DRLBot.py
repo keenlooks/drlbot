@@ -6,8 +6,8 @@ import cv2
 import numpy as np
 import theano
 from lasagne.init import GlorotUniform, Constant
-from lasagne.layers import Conv2DLayer, InputLayer, DenseLayer, MaxPool2DLayer, get_output, get_all_params, \
-    get_all_param_values, set_all_param_values
+from lasagne.layers import Conv2DLayer, InputLayer, DenseLayer, MaxPool2DLayer, LSTMLayer, get_output, \
+    get_all_params, get_all_param_values, set_all_param_values
 from lasagne.nonlinearities import rectify
 from lasagne.objectives import squared_error
 from lasagne.updates import rmsprop
@@ -48,6 +48,37 @@ class ReplayMemory:
         i = sample(range(0, self.size), sample_size)
         return self.s1[i], self.s2[i], self.a[i], self.r[i], self.nonterminal[i]
 
+# Recurrent memory:
+class RecurrentMemory:
+    def __init__(self, capacity, channels, downsampled_x, downsampled_y):
+
+        state_shape = (capacity, channels, downsampled_y, downsampled_x)
+        self.s = np.zeros(state_shape, dtype=np.float32)
+        self.a = np.zeros(capacity, dtype=np.int32)
+        self.r = np.zeros(capacity, dtype=np.float32)
+        self.nonterminal = np.zeros(capacity, dtype=np.bool_)
+
+        self.size = 0
+        self.capacity = capacity
+        self.oldest_index = 0
+
+    def add_transition(self, s1, action, reward):
+        self.s[self.oldest_index] = s1
+        if s1 is None:
+            self.nonterminal[self.oldest_index] = False
+        else:
+            self.nonterminal[self.oldest_index] = True
+        self.a[self.oldest_index] = action
+        self.r[self.oldest_index] = reward
+
+        self.oldest_index = (self.oldest_index + 1) % self.capacity
+
+        self.size = min(self.size + 1, self.capacity)
+
+    def get_sample(self, sample_size):
+        i = randint(0, self.size-sample_size)
+        return self.s1[i:i+sample_size], self.a[i:i+sample_size], self.r[i:i+sample_size], self.nonterminal[i:i+sample_size]
+        
 # DRLBot
 class DRLBot:
     # Q-learning settings:
@@ -96,15 +127,16 @@ class DRLBot:
     #   - an integer describing how many actions are available to the dqn
     #
     ############
-    def __init__(self,name="Darryl",get_state_f=None,make_action_f=None,available_actions_num=0):
+    def __init__(self,name="Darryl",get_state_f=None,make_action_f=None,available_actions_num=0,recurrent=False):
         self.name = name
         self.get_state_f = get_state_f
         self.make_action_f = make_action_f
+        self.recurrent = recurrent
         self.available_actions_num = available_actions_num
         self.memory = ReplayMemory(capacity=self.replay_memory_size, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
         self.dqn, self.learn, self.get_q_values, self.get_best_action = self.create_network(self.available_actions_num)
     
-    def load_model(self, params_loadfile="save_params"):
+    def load_model(self,params_loadfile="save_params"):
         if os.path.isfile(params_loadfile):
             params = pickle.load(open(params_loadfile, "r"))
             set_all_param_values(self.dqn, params)
@@ -132,7 +164,7 @@ class DRLBot:
 
         # Creates the input layer of the network.
         
-        dqn = InputLayer(shape=[None, self.channels, self.downsampled_y, self.downsampled_x], input_var=s1)
+        dqn = InputLayer(shape=[self.batch_size, self.channels, self.downsampled_y, self.downsampled_x], input_var=s1)
         
         
         # Adds 3 convolutional layers, each followed by a max pooling layer.
@@ -188,7 +220,7 @@ class DRLBot:
         # Checks the state and downsamples it.
         curr_state = self.get_state_f()
         if curr_state is None:
-            return -1
+            return None
         s1 = self.convert(curr_state)
 
         # With probability epsilon makes a random action.
@@ -242,7 +274,7 @@ class DRLBot:
         total_reward = 0
         for i in xrange(min(num_steps,self.memory.capacity)):
             result = self.perform_play_step() 
-            if result == -1:
+            if result == None:
                 epsilon = max(0.1,self.epsilon-0.01)
                 return total_reward
             else:
