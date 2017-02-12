@@ -1,5 +1,5 @@
 import itertools as it
-import pickle
+import pickle,os
 from random import sample, randint, random
 from time import time
 import cv2
@@ -74,7 +74,7 @@ class DRLBot:
     # Other parameters
     skiprate = 7
     channels = 3
-    downsampled_x = 128
+    downsampled_x = 192
     downsampled_y = downsampled_x
     episodes_to_watch = 10
 
@@ -103,7 +103,17 @@ class DRLBot:
         self.available_actions_num = available_actions_num
         self.memory = ReplayMemory(capacity=self.replay_memory_size, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
         self.dqn, self.learn, self.get_q_values, self.get_best_action = self.create_network(self.available_actions_num)
-        
+    
+    def load_model(self, params_loadfile="save_params"):
+        if os.path.isfile(params_loadfile):
+            params = pickle.load(open(params_loadfile, "r"))
+            set_all_param_values(self.dqn, params)
+        else:
+            print params_loadfile + " not found"
+    
+    def save_model(self,params_savefile="save_params"):
+        pickle.dump(get_all_param_values(self.dqn), open(params_savefile, "w"))
+    
     def convert(self,img):
         img = img.astype(np.float32) / 255.0
         #img = cv2.resize(img, (self.channels, self.downsampled_x, self.downsampled_y))
@@ -191,11 +201,28 @@ class DRLBot:
         reward *= self.reward_scale
         curr_state = self.get_state_f()
         if curr_state is None:
-            return -1
-        s2 = self.convert(curr_state)
+            s2 = None
+        else:
+            s2 = self.convert(curr_state)
         # Remember the transition that was just experienced.
         self.memory.add_transition(s1, a, s2, reward)
-        return None
+        return reward/self.reward_scale
+        
+    # Makes an action according to epsilon greedy policy and performs a single backpropagation on the network.
+    def perform_play_step_no_storage(self):
+        # Checks the state and downsamples it.
+        curr_state = self.get_state_f()
+        if curr_state is None:
+            return -1
+        s1 = self.convert(curr_state)
+
+
+            # Chooses the best action according to the network.
+        a = self.get_best_action(s1.reshape([1, self.channels, self.downsampled_y, self.downsampled_x]))
+        reward = self.make_action_f(a)
+        reward *= self.reward_scale
+        curr_state = self.get_state_f()
+        return reward/self.reward_scale
     
     # Makes an action according to epsilon greedy policy and performs a single backpropagation on the network.
     def perform_learning_step(self):
@@ -208,12 +235,20 @@ class DRLBot:
         return loss
     
     #gathers state-transition/reward pairs to be learned later
+    #RETURN - average reward
     def gain_experience(self,num_steps):
+        if num_steps < 1:
+            return 0
+        total_reward = 0
         for i in xrange(min(num_steps,self.memory.capacity)):
-            if self.perform_play_step() == -1:
+            result = self.perform_play_step() 
+            if result == -1:
                 epsilon = max(0.1,self.epsilon-0.01)
-                break
+                return total_reward
+            else:
+                total_reward += result
+        return total_reward
     
     def learn_from_experience(self,num_steps):
-        for i in xrange(num_steps):
+        for i in tqdm(xrange(num_steps)):
             self.perform_learning_step()

@@ -16,6 +16,11 @@
 # DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 # ------------------------------------------------------------------------------------------------
+import sys
+
+if len(sys.argv) < 2:
+    print "please provide path to model"
+    quit()
 
 import MalmoPython
 import random
@@ -24,13 +29,11 @@ import logging
 import struct
 import socket
 import os
-import sys
 import json
 import numpy as np
 from DRLBot import DRLBot
 from time import sleep
 from tqdm import *
-
 
 logging.basicConfig(level=logging.INFO)
 
@@ -77,8 +80,8 @@ missionXML = '''<?xml version="1.0" encoding="UTF-8" ?>
         <Summary>Survive!</Summary>
       </About>
      <ModSettings>
-        <MsPerTick>10</MsPerTick>
-        <PrioritiseOffscreenRendering>true</PrioritiseOffscreenRendering>
+        <MsPerTick>50</MsPerTick>
+        <PrioritiseOffscreenRendering>false</PrioritiseOffscreenRendering>
      </ModSettings>
      <ServerSection>
         <ServerInitialConditions>
@@ -199,27 +202,26 @@ def make_minecraft_action(action_i):
         total_reward += 5
    #print "reward for this move: "+str(total_reward)
     return total_reward
-    
+ 
 drlbot = DRLBot(get_state_f=get_minecraft_frame,make_action_f=make_minecraft_action,available_actions_num=len(actions))
+drlbot.load_model(sys.argv[1])
 
 
-
-for episode in xrange(1000):
-    start = time.time()
-    agent_host.startMission( my_mission, my_mission_record_spec )
+start = time.time()
+agent_host.startMission( my_mission, my_mission_record_spec )
+world_state = agent_host.getWorldState()
+while not world_state.has_mission_begun:
+    sys.stdout.write(".")
+    time.sleep(0.1)
     world_state = agent_host.getWorldState()
-    while not world_state.has_mission_begun:
-        sys.stdout.write(".")
-        time.sleep(0.1)
-        world_state = agent_host.getWorldState()
-    print
-    my_mission.setTimeOfDay(6000, False)
-    total_reward = 0
-    while world_state.is_mission_running:
-        world_state = agent_host.getWorldState()
-        if world_state.is_mission_running:
-            total_reward += drlbot.gain_experience(1)
-    print "Ep: ",episode, "Time to Die: ",time.time()-start, "Total Reward: ",total_reward
-    drlbot.learn_from_experience(500)
-    if episode % 50 == 0:
-        drlbot.save_model("D:\Projects\drlbot_models\minecraft_bot_"+str(episode)+".pkl")
+print
+my_mission.setTimeOfDay(6000, False)
+total_reward = 0
+while world_state.is_mission_running:
+    world_state = agent_host.getWorldState()
+    if world_state.is_mission_running:
+        reward_for_move = drlbot.perform_play_step_no_storage()
+        if reward_for_move != 0:
+            print "Received reward: "+str(reward_for_move)
+            total_reward += reward_for_move
+print "Time to Die: ",time.time()-start, "Total Reward: ",total_reward
