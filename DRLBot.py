@@ -5,9 +5,11 @@ from time import time
 import cv2
 import numpy as np
 import theano
+import lasagne
 from lasagne.init import GlorotUniform, Constant
-from lasagne.layers import Conv2DLayer, InputLayer, DenseLayer, MaxPool2DLayer, LSTMLayer, get_output, \
-    get_all_params, get_all_param_values, set_all_param_values
+from lasagne.layers import Conv2DLayer, InputLayer, DenseLayer, MaxPool2DLayer, ReshapeLayer, \
+    get_output, get_all_params, get_all_param_values, set_all_param_values
+from lasagne.layers.recurrent import LSTMLayer
 from lasagne.nonlinearities import rectify
 from lasagne.objectives import squared_error
 from lasagne.updates import rmsprop
@@ -164,7 +166,7 @@ class DRLBot:
 
         # Creates the input layer of the network.
         
-        dqn = InputLayer(shape=[self.batch_size, self.channels, self.downsampled_y, self.downsampled_x], input_var=s1)
+        dqn = InputLayer(shape=[None, self.channels, self.downsampled_y, self.downsampled_x], input_var=s1)
         
         
         # Adds 3 convolutional layers, each followed by a max pooling layer.
@@ -189,6 +191,24 @@ class DRLBot:
                          b=Constant(.1))
         dqn = DenseLayer(dqn, num_units=256, nonlinearity=rectify, W=GlorotUniform("relu"),
                          b=Constant(.1))
+        if self.recurrent:
+            gate_parameters = lasagne.layers.recurrent.Gate(
+                W_in=lasagne.init.Orthogonal(), W_hid=lasagne.init.Orthogonal(),
+                b=lasagne.init.Constant(0.))
+            cell_parameters = lasagne.layers.recurrent.Gate(
+                W_in=lasagne.init.Orthogonal(), W_hid=lasagne.init.Orthogonal(),
+                # Setting W_cell to None denotes that no cell connection will be used.
+                W_cell=None, b=lasagne.init.Constant(0.),
+                # By convention, the cell nonlinearity is tanh in an LSTM.
+                nonlinearity=lasagne.nonlinearities.tanh)
+            dqn = ReshapeLayer(dqn, (self.))
+            dqn = LSTMLayer(dqn, 100,
+                # Here, we supply the gate parabatch_sizemeters for each gate
+                ingate=gate_parameters, forgetgate=gate_parameters,
+                cell=cell_parameters, outgate=gate_parameters,
+                # We'll learn the initialization and use gradient clipping
+                learn_init=True, grad_clipping=100.)
+        
         # Adds a single fully connected layer which is the output layer.
         # (no nonlinearity as it is for approximating an arbitrary real function)
         dqn = DenseLayer(dqn, num_units=self.available_actions_num, nonlinearity=None)
