@@ -7,7 +7,7 @@ import numpy as np
 import theano
 import lasagne
 from lasagne.init import GlorotUniform, Constant
-from lasagne.layers import Conv2DLayer, InputLayer, DenseLayer, MaxPool2DLayer, ReshapeLayer, \
+from lasagne.layers import Conv2DLayer, InputLayer, DenseLayer, MaxPool2DLayer, ReshapeLayer, SliceLayer, \
     get_output, get_all_params, get_all_param_values, set_all_param_values
 from lasagne.layers.recurrent import LSTMLayer
 from lasagne.nonlinearities import rectify
@@ -63,6 +63,7 @@ class RecurrentMemory:
         self.size = 0
         self.capacity = capacity
         self.oldest_index = 0
+        self.current_episode_start = 0
 
     def add_transition(self, s1, action, reward):
         self.s[self.oldest_index] = s1
@@ -72,19 +73,37 @@ class RecurrentMemory:
             self.nonterminal[self.oldest_index] = True
         self.a[self.oldest_index] = action
         self.r[self.oldest_index] = reward
+        
+        if self.nonterminal[(self.capacity+self.oldest_index-1)%self.capacity] is False:
+            self.current_episode_start = self.oldest_index
 
         self.oldest_index = (self.oldest_index + 1) % self.capacity
 
         self.size = min(self.size + 1, self.capacity)
+    
+    def get_current_episode(self, max_time_steps=None):
+        if max_time_steps is None:
+            return self.s1[self.current_episode_start:self.oldest_index]
+        else:
+            i = np.max(self.current_episode_start, self.oldest_index-(max_time_steps))
+            return self.s1[i:self.oldest_index]
 
-    def get_sample(self, sample_size):
-        i = randint(0, self.size-sample_size)
-        return self.s1[i:i+sample_size], self.a[i:i+sample_size], self.r[i:i+sample_size], self.nonterminal[i:i+sample_size]
+    def get_random_episode_section(self, max_time_steps):
+        end_episode_indices = np.where(self.nonterminal)
+        i = randint(0, self.size)
+        j = i
+        while all(j != end_episode_indices-(max_time_steps-1)) and (j - i + self.capacity)%self.capacity < max_time_steps-1 and j < self.size:
+            j = (j + 1) % (self.capacity + 1)
+        return self.s1[i:j], self.s1[i:j], self.a[i+1:j+1], self.r[i+1:j+1], self.nonterminal[i+1:j+1]
+        
+    def get_sample(self, sample_size, max_time_steps):
+        i = sample(range(0, self.size), sample_size)
+        return self.s1[i], self.s2[i], self.a[i], self.r[i], self.nonterminal[i]
         
 # DRLBot
 class DRLBot:
     # Q-learning settings:
-    replay_memory_size = 10000
+    replay_memory_size = 50000
     discount_factor = 0.99
     start_epsilon = float(1.0)
     end_epsilon = float(0.1)
@@ -100,6 +119,8 @@ class DRLBot:
     # Some of the network's and learning settings:
     learning_rate = 0.00001
     batch_size = 32
+    max_time_steps = 32
+    num_hidden_units = 100
     epochs = 20
     training_steps_per_epoch = 5000
     test_episodes_per_epoch = 100
@@ -135,7 +156,7 @@ class DRLBot:
         self.make_action_f = make_action_f
         self.recurrent = recurrent
         self.available_actions_num = available_actions_num
-        self.memory = ReplayMemory(capacity=self.replay_memory_size, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
+        self.memory = RecurrentMemory(capacity=self.replay_memory_size, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
         self.dqn, self.learn, self.get_q_values, self.get_best_action = self.create_network(self.available_actions_num)
     
     def load_model(self,params_loadfile="save_params"):
@@ -165,9 +186,12 @@ class DRLBot:
         nonterminal = tensor.vector("Nonterminal", dtype="int8")
 
         # Creates the input layer of the network.
+        dqn = InputLayer(shape=[None, None, self.channels, self.downsampled_y, self.downsampled_x], input_var=s1)
         
-        dqn = InputLayer(shape=[None, self.channels, self.downsampled_y, self.downsampled_x], input_var=s1)
-        
+        # Retrieves the batch size and timestep size
+        input_shape = dqn.input_var.shape
+        # Reshapes layer to combine time-step and batch dimension so it can be used to non-recurrent layers
+        dqn = ReshapeLayer(dqn, (-1,self.channels, self.downsampled_y,self.downsampled_x))
         
         # Adds 3 convolutional layers, each followed by a max pooling layer.
         dqn = Conv2DLayer(dqn, num_filters=32, filter_size=[8, 8],
@@ -183,36 +207,35 @@ class DRLBot:
                           b=Constant(.1))
         dqn = MaxPool2DLayer(dqn, pool_size=[2, 2])
         # Adds a single fully connected layer.
-        #dqn = DenseLayer(dqn, num_units=768, nonlinearity=rectify, W=GlorotUniform("relu"),
-        #                 b=Constant(.1))
+        dqn = DenseLayer(dqn, num_units=768, nonlinearity=rectify, W=GlorotUniform("relu"),
+                         b=Constant(.1))
         dqn = DenseLayer(dqn, num_units=512, nonlinearity=rectify, W=GlorotUniform("relu"),
                          b=Constant(.1))
-        dqn = DenseLayer(dqn, num_units=384, nonlinearity=rectify, W=GlorotUniform("relu"),
-                         b=Constant(.1))
-        dqn = DenseLayer(dqn, num_units=256, nonlinearity=rectify, W=GlorotUniform("relu"),
-                         b=Constant(.1))
+
         if self.recurrent:
             gate_parameters = lasagne.layers.recurrent.Gate(
                 W_in=lasagne.init.Orthogonal(), W_hid=lasagne.init.Orthogonal(),
-                b=lasagne.init.Constant(0.))
+                b=lasagne.init.Constant(.1))
             cell_parameters = lasagne.layers.recurrent.Gate(
                 W_in=lasagne.init.Orthogonal(), W_hid=lasagne.init.Orthogonal(),
                 # Setting W_cell to None denotes that no cell connection will be used.
-                W_cell=None, b=lasagne.init.Constant(0.),
+                W_cell=None, b=lasagne.init.Constant(.1),
                 # By convention, the cell nonlinearity is tanh in an LSTM.
                 nonlinearity=lasagne.nonlinearities.tanh)
-            dqn = ReshapeLayer(dqn, (self.))
-            dqn = LSTMLayer(dqn, 100,
+            dqn = ReshapeLayer(dqn, (input_shape[0],input_shape[1],-1))
+            dqn = LSTMLayer(dqn, self.num_hidden_units,
                 # Here, we supply the gate parabatch_sizemeters for each gate
                 ingate=gate_parameters, forgetgate=gate_parameters,
                 cell=cell_parameters, outgate=gate_parameters,
                 # We'll learn the initialization and use gradient clipping
                 learn_init=True, grad_clipping=100.)
+            # Slices off the output from the last timestep
+            dqn = SliceLayer(dqn, indices=-1,axis=1)
         
         # Adds a single fully connected layer which is the output layer.
         # (no nonlinearity as it is for approximating an arbitrary real function)
         dqn = DenseLayer(dqn, num_units=self.available_actions_num, nonlinearity=None)
-
+        
         # Theano stuff
         q = get_output(dqn)
         # Only q for the chosen actions is updated more or less according to following formula:
@@ -248,7 +271,8 @@ class DRLBot:
             a = randint(0, self.available_actions_num - 1)
         else:
             # Chooses the best action according to the network.
-            a = self.get_best_action(s1.reshape([1, self.channels, self.downsampled_y, self.downsampled_x]))
+            
+            a = self.get_best_action(self.memory.get_current_episode(self.batch_size))
         reward = self.make_action_f(a)
         reward *= self.reward_scale
         curr_state = self.get_state_f()
@@ -270,7 +294,7 @@ class DRLBot:
 
 
             # Chooses the best action according to the network.
-        a = self.get_best_action(s1.reshape([1, self.channels, self.downsampled_y, self.downsampled_x]))
+        a = self.get_best_action(s1.reshape([1, 1, self.channels, self.downsampled_y, self.downsampled_x]))
         reward = self.make_action_f(a)
         reward *= self.reward_scale
         curr_state = self.get_state_f()
