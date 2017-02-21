@@ -55,7 +55,7 @@ class RecurrentMemory:
     def __init__(self, capacity, channels, downsampled_x, downsampled_y):
 
         state_shape = (capacity, channels, downsampled_y, downsampled_x)
-        self.s = np.zeros(state_shape, dtype=np.float32)
+        self.s1 = np.zeros(state_shape, dtype=np.float32)
         self.a = np.zeros(capacity, dtype=np.int32)
         self.r = np.zeros(capacity, dtype=np.float32)
         self.nonterminal = np.zeros(capacity, dtype=np.bool_)
@@ -66,7 +66,7 @@ class RecurrentMemory:
         self.current_episode_start = 0
 
     def add_transition(self, s1, action, reward):
-        self.s[self.oldest_index] = s1
+        self.s1[self.oldest_index] = s1
         if s1 is None:
             self.nonterminal[self.oldest_index] = False
         else:
@@ -83,22 +83,31 @@ class RecurrentMemory:
     
     def get_current_episode(self, max_time_steps=None):
         if max_time_steps is None:
-            return self.s1[self.current_episode_start:self.oldest_index]
+            if self.current_episode_start < self.oldest_index:
+                return self.s1[self.current_episode_start:self.oldest_index]
+            else:
+                return np.concatenate(self.s1[self.current_episode_start:self.size],self.s1[0:self.oldest_index],axis=0)
         else:
-            i = np.max(self.current_episode_start, self.oldest_index-(max_time_steps))
-            return self.s1[i:self.oldest_index]
+            i = np.max(self.current_episode_start, ((self.oldest_index-max_time_steps)+self.capacity)%self.capacity)
+            if i < self.oldest_index:
+                return self.s1[i:self.oldest_index]
+            else:
+                return np.concatenate(self.s1[i:self.size],self.s1[0:self.oldest_index],axis=0)
 
     def get_random_episode_section(self, max_time_steps):
-        end_episode_indices = np.where(self.nonterminal)
+        end_episode_indices = np.where(self.nonterminal is False)[0]
+        # get ranges where start should not be. add a buffer of one to account for time step shift from s1 -> s2
+        bad_starts = zip((end_episode_indices - max_time_steps - 1).tolist(),end_episode_indices.tolist())
         i = randint(0, self.size)
         j = i
-        while all(j != end_episode_indices-(max_time_steps-1)) and (j - i + self.capacity)%self.capacity < max_time_steps-1 and j < self.size:
-            j = (j + 1) % (self.capacity + 1)
-        return self.s1[i:j], self.s1[i:j], self.a[i+1:j+1], self.r[i+1:j+1], self.nonterminal[i+1:j+1]
-        
-    def get_sample(self, sample_size, max_time_steps):
-        i = sample(range(0, self.size), sample_size)
-        return self.s1[i], self.s2[i], self.a[i], self.r[i], self.nonterminal[i]
+        while j-i < 1:
+            i = randint(0, self.size)
+            while any([i>ra[0] and i<=ra[1] for ra in bad_starts]):
+                i = randint(0, self.size)
+            j = i
+            while all(j != end_episode_indices) and j - i < max_time_steps and j < self.size-1:
+                j = (j + 1) #% (self.capacity + 1)
+        return self.s1[i:j], self.s1[i+1:j+1], self.a[j:j+1], self.r[j:j+1], self.nonterminal[j:j+1]
         
 # DRLBot
 class DRLBot:
@@ -118,7 +127,7 @@ class DRLBot:
 
     # Some of the network's and learning settings:
     learning_rate = 0.00001
-    batch_size = 32
+    batch_size = 1
     max_time_steps = 32
     num_hidden_units = 100
     epochs = 20
@@ -150,11 +159,10 @@ class DRLBot:
     #   - an integer describing how many actions are available to the dqn
     #
     ############
-    def __init__(self,name="Darryl",get_state_f=None,make_action_f=None,available_actions_num=0,recurrent=False):
+    def __init__(self,name="Darryl",get_state_f=None,make_action_f=None,available_actions_num=0):
         self.name = name
         self.get_state_f = get_state_f
         self.make_action_f = make_action_f
-        self.recurrent = recurrent
         self.available_actions_num = available_actions_num
         self.memory = RecurrentMemory(capacity=self.replay_memory_size, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
         self.dqn, self.learn, self.get_q_values, self.get_best_action = self.create_network(self.available_actions_num)
@@ -176,10 +184,11 @@ class DRLBot:
 
     # Creates the network:
     def create_network(self,available_actions_num = None):
+        dtensor5 = tensor.TensorType('float32', (False,)*5)
         if available_actions_num == None:
             available_actions_num = self.available_actions_num
         # Creates the input variables
-        s1 = tensor.tensor4("States")
+        s1 = dtensor5("States")
         a = tensor.vector("Actions", dtype="int32")
         q2 = tensor.vector("Next State best Q-Value")
         r = tensor.vector("Rewards")
@@ -207,30 +216,27 @@ class DRLBot:
                           b=Constant(.1))
         dqn = MaxPool2DLayer(dqn, pool_size=[2, 2])
         # Adds a single fully connected layer.
-        dqn = DenseLayer(dqn, num_units=768, nonlinearity=rectify, W=GlorotUniform("relu"),
-                         b=Constant(.1))
         dqn = DenseLayer(dqn, num_units=512, nonlinearity=rectify, W=GlorotUniform("relu"),
                          b=Constant(.1))
 
-        if self.recurrent:
-            gate_parameters = lasagne.layers.recurrent.Gate(
-                W_in=lasagne.init.Orthogonal(), W_hid=lasagne.init.Orthogonal(),
-                b=lasagne.init.Constant(.1))
-            cell_parameters = lasagne.layers.recurrent.Gate(
-                W_in=lasagne.init.Orthogonal(), W_hid=lasagne.init.Orthogonal(),
-                # Setting W_cell to None denotes that no cell connection will be used.
-                W_cell=None, b=lasagne.init.Constant(.1),
-                # By convention, the cell nonlinearity is tanh in an LSTM.
-                nonlinearity=lasagne.nonlinearities.tanh)
-            dqn = ReshapeLayer(dqn, (input_shape[0],input_shape[1],-1))
-            dqn = LSTMLayer(dqn, self.num_hidden_units,
-                # Here, we supply the gate parabatch_sizemeters for each gate
-                ingate=gate_parameters, forgetgate=gate_parameters,
-                cell=cell_parameters, outgate=gate_parameters,
-                # We'll learn the initialization and use gradient clipping
-                learn_init=True, grad_clipping=100.)
-            # Slices off the output from the last timestep
-            dqn = SliceLayer(dqn, indices=-1,axis=1)
+        gate_parameters = lasagne.layers.recurrent.Gate(
+            W_in=lasagne.init.Orthogonal(), W_hid=lasagne.init.Orthogonal(),
+            b=lasagne.init.Constant(.0))
+        cell_parameters = lasagne.layers.recurrent.Gate(
+            W_in=lasagne.init.Orthogonal(), W_hid=lasagne.init.Orthogonal(),
+            # Setting W_cell to None denotes that no cell connection will be used.
+            W_cell=None, b=lasagne.init.Constant(.0),
+            # By convention, the cell nonlinearity is tanh in an LSTM.
+            nonlinearity=lasagne.nonlinearities.tanh)
+        dqn = ReshapeLayer(dqn, (input_shape[0],input_shape[1],dqn.output_shape[-1]))
+        dqn = LSTMLayer(dqn, self.num_hidden_units,
+            # Here, we supply the gate parabatch_sizemeters for each gate
+            ingate=gate_parameters, forgetgate=gate_parameters,
+            cell=cell_parameters, outgate=gate_parameters,
+            # We'll learn the initialization and use gradient clipping
+            learn_init=True, grad_clipping=100.)
+        # Slices off the output from the last timestep
+        dqn = SliceLayer(dqn, indices=-1,axis=1)
         
         # Adds a single fully connected layer which is the output layer.
         # (no nonlinearity as it is for approximating an arbitrary real function)
@@ -272,16 +278,16 @@ class DRLBot:
         else:
             # Chooses the best action according to the network.
             
-            a = self.get_best_action(self.memory.get_current_episode(self.batch_size))
+            a = self.get_best_action(self.memory.get_current_episode(self.max_time_steps))
         reward = self.make_action_f(a)
         reward *= self.reward_scale
-        curr_state = self.get_state_f()
-        if curr_state is None:
-            s2 = None
-        else:
-            s2 = self.convert(curr_state)
+        #curr_state = self.get_state_f()
+        #if curr_state is None:
+        #    s2 = None
+        #else:
+        #    s2 = self.convert(curr_state)
         # Remember the transition that was just experienced.
-        self.memory.add_transition(s1, a, s2, reward)
+        self.memory.add_transition(s1, a, reward)
         return reward/self.reward_scale
         
     # Makes an action according to epsilon greedy policy and performs a single backpropagation on the network.
@@ -294,7 +300,7 @@ class DRLBot:
 
 
             # Chooses the best action according to the network.
-        a = self.get_best_action(s1.reshape([1, 1, self.channels, self.downsampled_y, self.downsampled_x]))
+        a = self.get_best_action(s1.reshape([1, -1, self.channels, self.downsampled_y, self.downsampled_x]))
         reward = self.make_action_f(a)
         reward *= self.reward_scale
         curr_state = self.get_state_f()
@@ -302,10 +308,10 @@ class DRLBot:
     
     # Makes an action according to epsilon greedy policy and performs a single backpropagation on the network.
     def perform_learning_step(self):
-        if self.memory.size > self.batch_size:
-            s1, s2, a, reward, nonterminal = self.memory.get_sample(self.batch_size)
-            q2 = np.max(self.get_q_values(s2), axis=1)
-            loss = self.learn(s1, q2, a, reward, nonterminal)
+        if self.memory.size > self.max_time_steps:
+            s1, s2, a, reward, nonterminal = self.memory.get_random_episode_section(self.max_time_steps)
+            q2 = np.max(self.get_q_values(s2.reshape([self.batch_size, -1, self.channels, self.downsampled_y, self.downsampled_x])), axis=1)
+            loss = self.learn(s1.reshape([self.batch_size, -1, self.channels, self.downsampled_y, self.downsampled_x]), q2, a, reward, nonterminal)
         else:
             loss = 0
         return loss

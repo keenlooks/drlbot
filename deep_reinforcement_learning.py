@@ -170,21 +170,15 @@ def is_agent_in_new_area():
     
 def get_minecraft_frame():
     world_state = agent_host.peekWorldState()
-    while len(world_state.video_frames) < 1 and world_state.is_mission_running:
+    while len(world_state.video_frames) < 5 and world_state.is_mission_running:
         logger.info("Waiting for frames...")
         time.sleep(0.001)
         world_state = agent_host.peekWorldState()
     if not world_state.is_mission_running:
         return None
     logger.info("Got frame!")
-    pixels = agent_host.peekWorldState().video_frames[0].pixels
-    #red,green,blue = pixels[0::4],pixels[1::4],pixels[2::4]
-    #pixels_averaged = [int(np.mean([re,ge,be])) for re,ge,be in zip(red,green,blue)]
-    #green.extend(blue)
-    #red.extend(green)
-    #pixels_no_depth = red
-    return np.reshape(pixels,(channels,video_width,video_height),order='F')
-    #return np.reshape(np.mat(green,dtype=np.float32),(video_width,video_height),order='C')
+    pixels = agent_host.getWorldState().video_frames[0].pixels
+    return np.reshape(pixels,(channels,video_height,video_width),order='F')
 
     
 def make_minecraft_action(action_i):
@@ -216,7 +210,7 @@ for episode in xrange(1000):
     my_mission.setTimeOfDay(6000, False)
     total_reward = 0
     while world_state.is_mission_running:
-        world_state = agent_host.getWorldState()
+        world_state = agent_host.peekWorldState()
         if world_state.is_mission_running:
             total_reward += drlbot.gain_experience(1)
     print "Ep: ",episode, "Time to Die: ",time.time()-start, "Total Reward: ",total_reward
