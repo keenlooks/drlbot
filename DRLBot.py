@@ -111,7 +111,7 @@ class RecurrentMemory:
                     i = self.current_episode_start
                 else:
                     i = ((self.oldest_index-max_time_steps)+self.capacity)%self.capacity
-                return np.concatenate(self.s1[i:self.size],self.s1[0:self.oldest_index],axis=0).reshape([1,-1,self.channels,self.downsampled_y,self.downsampled_x])
+                return np.concatenate((self.s1[i:self.size],self.s1[0:self.oldest_index]),axis=0).reshape([1,-1,self.channels,self.downsampled_y,self.downsampled_x])
 
     def get_random_episode_section(self):
         end_episode_indices = np.where(self.nonterminal is False)[0]
@@ -160,8 +160,8 @@ class DRLBot:
     end_epsilon = float(0.1)
     epsilon = start_epsilon
     epsilon = 1.0
-    static_epsilon_steps = 2500
-    epsilon_decay_steps = 10000
+    static_epsilon_steps = 5000
+    epsilon_decay_steps = 20000
     epsilon_decay_stride = (start_epsilon - end_epsilon) / epsilon_decay_steps
 
     # Max reward is about 100 (for killing) so it'll be normalized
