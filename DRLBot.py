@@ -52,18 +52,30 @@ class ReplayMemory:
 
 # Recurrent memory:
 class RecurrentMemory:
-    def __init__(self, capacity, channels, downsampled_x, downsampled_y):
+    def __init__(self, capacity, batch_size, max_time_steps, channels, downsampled_x, downsampled_y):
 
         state_shape = (capacity, channels, downsampled_y, downsampled_x)
         self.s1 = np.zeros(state_shape, dtype=np.float32)
         self.a = np.zeros(capacity, dtype=np.int32)
         self.r = np.zeros(capacity, dtype=np.float32)
         self.nonterminal = np.zeros(capacity, dtype=np.bool_)
-
+        
         self.size = 0
         self.capacity = capacity
         self.oldest_index = 0
         self.current_episode_start = 0
+        self.current_episode_length = 0
+        self.channels = channels
+        self.downsampled_x = downsampled_x
+        self.downsampled_y = downsampled_y
+        self.batch_size = batch_size
+        self.max_time_steps = max_time_steps
+        
+        self.s1_batch = np.zeros((batch_size,max_time_steps,channels,downsampled_y,downsampled_x), dtype=np.float32)
+        self.s2_batch = np.zeros((batch_size,max_time_steps,channels,downsampled_y,downsampled_x), dtype=np.float32)
+        self.a_batch = np.zeros((batch_size), dtype=np.int32)
+        self.r_batch = np.zeros((batch_size), dtype=np.float32)
+        self.nonterminal_batch = np.zeros((batch_size), dtype=np.bool_)
 
     def add_transition(self, s1, action, reward):
         self.s1[self.oldest_index] = s1
@@ -76,6 +88,9 @@ class RecurrentMemory:
         
         if self.nonterminal[(self.capacity+self.oldest_index-1)%self.capacity] is False:
             self.current_episode_start = self.oldest_index
+            self.current_episode_length = 1
+        else:
+            self.current_episode_length += 1
 
         self.oldest_index = (self.oldest_index + 1) % self.capacity
 
@@ -88,16 +103,20 @@ class RecurrentMemory:
             else:
                 return np.concatenate(self.s1[self.current_episode_start:self.size],self.s1[0:self.oldest_index],axis=0)
         else:
-            i = np.max(self.current_episode_start, ((self.oldest_index-max_time_steps)+self.capacity)%self.capacity)
-            if i < self.oldest_index:
-                return self.s1[i:self.oldest_index]
+            if self.current_episode_start < self.oldest_index:
+                i = max(self.current_episode_start, self.oldest_index-max_time_steps)
+                return self.s1[i:self.oldest_index].reshape([1,-1,self.channels,self.downsampled_y,self.downsampled_x])
             else:
-                return np.concatenate(self.s1[i:self.size],self.s1[0:self.oldest_index],axis=0)
+                if self.current_episode_length < self.max_time_steps:
+                    i = self.current_episode_start
+                else:
+                    i = ((self.oldest_index-max_time_steps)+self.capacity)%self.capacity
+                return np.concatenate(self.s1[i:self.size],self.s1[0:self.oldest_index],axis=0).reshape([1,-1,self.channels,self.downsampled_y,self.downsampled_x])
 
-    def get_random_episode_section(self, max_time_steps):
+    def get_random_episode_section(self):
         end_episode_indices = np.where(self.nonterminal is False)[0]
         # get ranges where start should not be. add a buffer of one to account for time step shift from s1 -> s2
-        bad_starts = zip((end_episode_indices - max_time_steps - 1).tolist(),end_episode_indices.tolist())
+        bad_starts = zip((end_episode_indices - self.max_time_steps - 1).tolist(),end_episode_indices.tolist())
         i = randint(0, self.size)
         j = i
         while j-i < 1:
@@ -105,9 +124,32 @@ class RecurrentMemory:
             while any([i>ra[0] and i<=ra[1] for ra in bad_starts]):
                 i = randint(0, self.size)
             j = i
-            while all(j != end_episode_indices) and j - i < max_time_steps and j < self.size-1:
+            while all(j != end_episode_indices) and j - i < self.max_time_steps and j < self.size-1:
                 j = (j + 1) #% (self.capacity + 1)
         return self.s1[i:j], self.s1[i+1:j+1], self.a[j:j+1], self.r[j:j+1], self.nonterminal[j:j+1]
+    
+    def get_random_episode_section_batch(self):
+        end_episode_indices = np.where(self.nonterminal is False)[0]
+        # get ranges where start should not be. add a buffer of one to account for time step shift from s1 -> s2
+        bad_starts = zip((end_episode_indices - self.max_time_steps - 1).tolist(),end_episode_indices.tolist())
+        i = randint(0, self.size)
+        j = i
+        for batch_i in xrange(self.batch_size):
+            while j-i < 1:
+                i = randint(0, min(self.capacity-self.max_time_steps,self.size))
+                while any([i>ra[0] and i<=ra[1] for ra in bad_starts]):
+                    i = randint(0, self.size)
+                j = i
+                while all(j != end_episode_indices) and j - i < self.max_time_steps and j < self.size-1:
+                    j = (j + 1) #% (self.capacity + 1)
+            self.s1_batch[batch_i][i-j:] = self.s1[i:j]
+            self.s1_batch[batch_i][:i-j] = 0
+            self.s2_batch[batch_i][i-j:] = self.s1[i+1:j+1]
+            self.s2_batch[batch_i][:i-j] = 0
+            self.a_batch[batch_i] = self.a[j:j+1]
+            self.r_batch[batch_i] = self.r[j:j+1]
+            self.nonterminal_batch[batch_i] = self.nonterminal[j:j+1]
+        return self.s1_batch,self.s2_batch,self.a_batch,self.r_batch,self.nonterminal_batch
         
 # DRLBot
 class DRLBot:
@@ -118,8 +160,8 @@ class DRLBot:
     end_epsilon = float(0.1)
     epsilon = start_epsilon
     epsilon = 1.0
-    static_epsilon_steps = 5000
-    epsilon_decay_steps = 20000
+    static_epsilon_steps = 2500
+    epsilon_decay_steps = 10000
     epsilon_decay_stride = (start_epsilon - end_epsilon) / epsilon_decay_steps
 
     # Max reward is about 100 (for killing) so it'll be normalized
@@ -127,19 +169,19 @@ class DRLBot:
 
     # Some of the network's and learning settings:
     learning_rate = 0.00001
-    batch_size = 1
+    batch_size = 4
     max_time_steps = 32
     num_hidden_units = 100
     epochs = 20
     training_steps_per_epoch = 5000
     test_episodes_per_epoch = 100
+    steps_taken = 0
 
     # Other parameters
     skiprate = 7
     channels = 3
     downsampled_x = 192
     downsampled_y = downsampled_x
-    episodes_to_watch = 10
 
     # Where to save and load network's weights.
     #params_savefile = "basic_params"
@@ -159,12 +201,13 @@ class DRLBot:
     #   - an integer describing how many actions are available to the dqn
     #
     ############
-    def __init__(self,name="Darryl",get_state_f=None,make_action_f=None,available_actions_num=0):
+    def __init__(self,name="Darryl",get_state_f=None,make_action_f=None,get_reward_f = None,available_actions_num=0):
         self.name = name
         self.get_state_f = get_state_f
         self.make_action_f = make_action_f
+        self.get_reward_f = get_reward_f
         self.available_actions_num = available_actions_num
-        self.memory = RecurrentMemory(capacity=self.replay_memory_size, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
+        self.memory = RecurrentMemory(capacity=self.replay_memory_size, batch_size=self.batch_size, max_time_steps=self.max_time_steps, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
         self.dqn, self.learn, self.get_q_values, self.get_best_action = self.create_network(self.available_actions_num)
     
     def load_model(self,params_loadfile="save_params"):
@@ -267,17 +310,15 @@ class DRLBot:
     # Makes an action according to epsilon greedy policy and performs a single backpropagation on the network.
     def perform_play_step(self):
         # Checks the state and downsamples it.
-        curr_state = self.get_state_f()
-        if curr_state is None:
-            return None
-        s1 = self.convert(curr_state)
+        s1 = self.get_state_f()
+        if s1 is not None:
+            s1 = self.convert(s1)
 
         # With probability epsilon makes a random action.
         if random() <= self.epsilon:
             a = randint(0, self.available_actions_num - 1)
         else:
             # Chooses the best action according to the network.
-            
             a = self.get_best_action(self.memory.get_current_episode(self.max_time_steps))
         reward = self.make_action_f(a)
         reward *= self.reward_scale
@@ -309,9 +350,9 @@ class DRLBot:
     # Makes an action according to epsilon greedy policy and performs a single backpropagation on the network.
     def perform_learning_step(self):
         if self.memory.size > self.max_time_steps:
-            s1, s2, a, reward, nonterminal = self.memory.get_random_episode_section(self.max_time_steps)
-            q2 = np.max(self.get_q_values(s2.reshape([self.batch_size, -1, self.channels, self.downsampled_y, self.downsampled_x])), axis=1)
-            loss = self.learn(s1.reshape([self.batch_size, -1, self.channels, self.downsampled_y, self.downsampled_x]), q2, a, reward, nonterminal)
+            s1, s2, a, reward, nonterminal = self.memory.get_random_episode_section_batch()
+            q2 = np.max(self.get_q_values(s2.reshape([self.batch_size, self.max_time_steps, self.channels, self.downsampled_y, self.downsampled_x])), axis=1)
+            loss = self.learn(s1.reshape([self.batch_size, self.max_time_steps, self.channels, self.downsampled_y, self.downsampled_x]), q2, a, reward, nonterminal)
         else:
             loss = 0
         return loss
@@ -323,14 +364,13 @@ class DRLBot:
             return 0
         total_reward = 0
         for i in xrange(min(num_steps,self.memory.capacity)):
-            result = self.perform_play_step() 
-            if result == None:
-                epsilon = max(0.1,self.epsilon-0.01)
-                return total_reward
-            else:
-                total_reward += result
+            total_reward += self.perform_play_step()
         return total_reward
     
     def learn_from_experience(self,num_steps):
+        print "Steps taken: ",self.steps_taken,"Epsilon: ",self.epsilon
         for i in tqdm(xrange(num_steps)):
+            self.steps_taken += 1
+            if self.steps_taken > self.static_epsilon_steps:
+                self.epsilon = max(self.end_epsilon,self.epsilon-self.epsilon_decay_stride)
             self.perform_learning_step()

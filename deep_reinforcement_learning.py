@@ -141,6 +141,7 @@ else:
 my_mission_record_spec = MalmoPython.MissionRecordSpec()
 
 where_i_have_been_before = []
+curr_stride_rewards = 0
 
 #function that gets agents x,y,z cooordinates from JSON observations
 def get_agent_location():
@@ -167,8 +168,20 @@ def is_agent_in_new_area():
             return False
     where_i_have_been_before.append(curr_loc)
     return True
+
+def get_minecraft_reward():
+    global curr_stride_rewards
+    rewards = agent_host.peekWorldState().rewards
+    for reward in rewards:
+        curr_stride_rewards += reward.getValue()
+    if is_agent_in_new_area():
+        curr_stride_rewards += 5
+    total_reward = curr_stride_rewards
+    curr_stride_rewards = 0
+    return total_reward
     
 def get_minecraft_frame():
+    global curr_stride_rewards
     world_state = agent_host.peekWorldState()
     while len(world_state.video_frames) < 5 and world_state.is_mission_running:
         logger.info("Waiting for frames...")
@@ -177,24 +190,28 @@ def get_minecraft_frame():
     if not world_state.is_mission_running:
         return None
     logger.info("Got frame!")
-    pixels = agent_host.getWorldState().video_frames[0].pixels
+    world_state = agent_host.getWorldState()
+    pixels = world_state.video_frames[0].pixels
+    for reward in world_state.rewards:
+        curr_stride_rewards += reward
     return np.reshape(pixels,(channels,video_height,video_width),order='F')
 
     
 def make_minecraft_action(action_i):
+    global curr_stride_rewards
     for action_tuple in zip(action_strings,actions[action_i]):
         agent_host.sendCommand(action_tuple[0]+" "+str(action_tuple[1]))
         logger.info("doing "+action_tuple[0]+" "+str(action_tuple[1]))
-    total_reward = 0
     rewards = agent_host.peekWorldState().rewards
     for reward in rewards:
-        total_reward += reward.getValue()
+        curr_stride_rewards += reward.getValue()
     if is_agent_in_new_area():
-        total_reward += 5
-   #print "reward for this move: "+str(total_reward)
+        curr_stride_rewards += 5
+    total_reward = curr_stride_rewards
+    curr_stride_rewards = 0
     return total_reward
     
-drlbot = DRLBot(get_state_f=get_minecraft_frame,make_action_f=make_minecraft_action,available_actions_num=len(actions))
+drlbot = DRLBot(get_state_f=get_minecraft_frame,make_action_f=make_minecraft_action,get_reward_f=get_minecraft_reward,available_actions_num=len(actions))
 
 
 
