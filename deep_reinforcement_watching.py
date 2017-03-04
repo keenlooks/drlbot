@@ -62,15 +62,15 @@ channels = 3
 
 action_strings = ["move","strafe","pitch","turn","jump","crouch","attack","use"]    
 actions = [[1,0,0,0,0,0,0,0]   # 0 - move forward
-#          ,[-1,0,0,0,0,0,0,0],  # 1 - move backward
+          ,[-1,0,0,0,0,0,0,0]  # 1 - move backward
           ,[1,0,0,0,1,0,0,0]   # 2 - move forward and jump
           ,[0,0,0,1,0,0,0,0]   # 3 - turn right
           ,[0,0,0,-1,0,0,0,0]  # 4 - turn left
-#          ,[0,0,0,0,0,0,1,0],   # 5 - attack
-#          ,[0,0,0,0,0,0,0,1],   # 6 - use
+          ,[0,0,0,0,0,0,1,0]   # 5 - attack
+          ,[0,0,0,0,0,0,0,1]   # 6 - use
           ,[0,0,0,0,1,0,0,0]   # 7 - jump
-#          ,[0,0,1,0,0,0,0,0],   # 8 - look down
-#          ,[0,0,-1,0,0,0,0,0],  # 9 - look up
+          ,[0,0,1,0,0,0,0,0]   # 8 - look down
+          ,[0,0,-1,0,0,0,0,0]  # 9 - look up
           ,[0,0,0,0,0,0,0,0]   # 10 - do nothing
            ]
 missionXML = '''<?xml version="1.0" encoding="UTF-8" ?>
@@ -166,7 +166,7 @@ def is_agent_in_new_area():
     
     for loc in where_i_have_been_before:
         #the [::2] makes it only use the XPos and ZPos variables so movement in height (falling or jumping) does not get it a reward
-        if np.linalg.norm(np.array(curr_loc[::2])-np.array(loc[::2])) < 10:
+        if np.linalg.norm(np.array(curr_loc[::2])-np.array(loc[::2])) < 5:
             return False
     where_i_have_been_before.append(curr_loc)
     return True

@@ -11,7 +11,7 @@ from lasagne.layers import Conv2DLayer, InputLayer, DenseLayer, MaxPool2DLayer, 
     get_output, get_all_params, get_all_param_values, set_all_param_values
 from lasagne.layers.recurrent import LSTMLayer
 from lasagne.nonlinearities import rectify
-from lasagne.objectives import squared_error
+from lasagne.objectives import squared_error,categorical_crossentropy
 from lasagne.updates import rmsprop
 from theano import tensor
 from tqdm import *
@@ -52,7 +52,7 @@ class ReplayMemory:
 
 # Recurrent memory:
 class RecurrentMemory:
-    def __init__(self, capacity, batch_size, max_time_steps, channels, downsampled_x, downsampled_y):
+    def __init__(self, discount_factor, capacity, batch_size, max_time_steps, channels, downsampled_x, downsampled_y):
 
         state_shape = (capacity, channels, downsampled_y, downsampled_x)
         self.s1 = np.zeros(state_shape, dtype=np.float32)
@@ -70,6 +70,7 @@ class RecurrentMemory:
         self.downsampled_y = downsampled_y
         self.batch_size = batch_size
         self.max_time_steps = max_time_steps
+        self.discount_factor = discount_factor
         
         self.s1_batch = np.zeros((batch_size,max_time_steps,channels,downsampled_y,downsampled_x), dtype=np.float32)
         self.s2_batch = np.zeros((batch_size,max_time_steps,channels,downsampled_y,downsampled_x), dtype=np.float32)
@@ -78,13 +79,19 @@ class RecurrentMemory:
         self.nonterminal_batch = np.zeros((batch_size), dtype=np.bool_)
 
     def add_transition(self, s1, action, reward):
-        self.s1[self.oldest_index] = s1
-        if s1 is None:
-            self.nonterminal[self.oldest_index] = False
-        else:
-            self.nonterminal[self.oldest_index] = True
         self.a[self.oldest_index] = action
         self.r[self.oldest_index] = reward
+        self.s1[self.oldest_index] = s1
+        if s1 is None:
+            #now that it is the end of an episode, we must go back and recalculate rewards with discount factor
+            self.nonterminal[self.oldest_index] = False
+            reverse_index = (self.oldest_index + self.capacity - 1)%self.capacity
+            while reverse_index != self.current_episode_start:
+                self.r[reverse_index] += self.discount_factor*self.r[(reverse_index+1)%self.capacity]
+                reverse_index = (reverse_index + self.capacity - 1)%self.capacity
+        else:
+            self.nonterminal[self.oldest_index] = True
+        
         
         if self.nonterminal[(self.capacity+self.oldest_index-1)%self.capacity] is False:
             self.current_episode_start = self.oldest_index
@@ -101,17 +108,17 @@ class RecurrentMemory:
             if self.current_episode_start < self.oldest_index:
                 return self.s1[self.current_episode_start:self.oldest_index]
             else:
-                return np.concatenate(self.s1[self.current_episode_start:self.size],self.s1[0:self.oldest_index],axis=0)
+                return np.concatenate(self.s1[self.current_episode_start:self.capacity],self.s1[0:self.oldest_index],axis=0)
         else:
-            if self.current_episode_start < self.oldest_index:
-                i = max(self.current_episode_start, self.oldest_index-max_time_steps)
+            i = 0
+            if self.current_episode_length < self.max_time_steps:
+                i = self.current_episode_start
+            else:
+                i = ((self.oldest_index-max_time_steps)+self.capacity)%self.capacity
+            if i < self.oldest_index:
                 return self.s1[i:self.oldest_index].reshape([1,-1,self.channels,self.downsampled_y,self.downsampled_x])
             else:
-                if self.current_episode_length < self.max_time_steps:
-                    i = self.current_episode_start
-                else:
-                    i = ((self.oldest_index-max_time_steps)+self.capacity)%self.capacity
-                return np.concatenate((self.s1[i:self.size],self.s1[0:self.oldest_index]),axis=0).reshape([1,-1,self.channels,self.downsampled_y,self.downsampled_x])
+                return np.concatenate((self.s1[i:self.capacity],self.s1[0:self.oldest_index]),axis=0).reshape([1,-1,self.channels,self.downsampled_y,self.downsampled_x])
 
     def get_random_episode_section(self):
         end_episode_indices = np.where(self.nonterminal is False)[0]
@@ -126,7 +133,7 @@ class RecurrentMemory:
             j = i
             while all(j != end_episode_indices) and j - i < self.max_time_steps and j < self.size-1:
                 j = (j + 1) #% (self.capacity + 1)
-        return self.s1[i:j], self.s1[i+1:j+1], self.a[j:j+1], self.r[j:j+1], self.nonterminal[j:j+1]
+        return self.s1[i:j], self.s1[i+1:j+1], self.a[j-1:j], self.r[j-1:j], self.nonterminal[j-1:j]
     
     def get_random_episode_section_batch(self):
         end_episode_indices = np.where(self.nonterminal is False)[0]
@@ -160,7 +167,7 @@ class DRLBot:
     end_epsilon = float(0.1)
     epsilon = start_epsilon
     epsilon = 1.0
-    static_epsilon_steps = 5000
+    static_epsilon_steps = 0
     epsilon_decay_steps = 20000
     epsilon_decay_stride = (start_epsilon - end_epsilon) / epsilon_decay_steps
 
@@ -169,9 +176,9 @@ class DRLBot:
 
     # Some of the network's and learning settings:
     learning_rate = 0.00001
-    batch_size = 4
-    max_time_steps = 32
-    num_hidden_units = 100
+    batch_size = 32
+    max_time_steps = 1
+    num_hidden_units = 128
     epochs = 20
     training_steps_per_epoch = 5000
     test_episodes_per_epoch = 100
@@ -207,8 +214,8 @@ class DRLBot:
         self.make_action_f = make_action_f
         self.get_reward_f = get_reward_f
         self.available_actions_num = available_actions_num
-        self.memory = RecurrentMemory(capacity=self.replay_memory_size, batch_size=self.batch_size, max_time_steps=self.max_time_steps, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
-        self.dqn, self.learn, self.get_q_values, self.get_best_action = self.create_network(self.available_actions_num)
+        self.memory = RecurrentMemory(capacity=self.replay_memory_size,discount_factor=self.discount_factor, batch_size=self.batch_size, max_time_steps=self.max_time_steps, channels=self.channels, downsampled_x=self.downsampled_x, downsampled_y=self.downsampled_y)
+        self.dqn, self.learn, self.get_q_values, self.get_best_action, self.get_good_action = self.create_network(self.available_actions_num)
     
     def load_model(self,params_loadfile="save_params"):
         if os.path.isfile(params_loadfile):
@@ -243,7 +250,7 @@ class DRLBot:
         # Retrieves the batch size and timestep size
         input_shape = dqn.input_var.shape
         # Reshapes layer to combine time-step and batch dimension so it can be used to non-recurrent layers
-        dqn = ReshapeLayer(dqn, (-1,self.channels, self.downsampled_y,self.downsampled_x))
+        dqn = ReshapeLayer(dqn, (-1,self.channels,self.downsampled_y,self.downsampled_x))
         
         # Adds 3 convolutional layers, each followed by a max pooling layer.
         dqn = Conv2DLayer(dqn, num_filters=32, filter_size=[8, 8],
@@ -259,7 +266,7 @@ class DRLBot:
                           b=Constant(.1))
         dqn = MaxPool2DLayer(dqn, pool_size=[2, 2])
         # Adds a single fully connected layer.
-        dqn = DenseLayer(dqn, num_units=512, nonlinearity=rectify, W=GlorotUniform("relu"),
+        dqn = DenseLayer(dqn, num_units=64, nonlinearity=rectify, W=GlorotUniform("relu"),
                          b=Constant(.1))
 
         gate_parameters = lasagne.layers.recurrent.Gate(
@@ -289,8 +296,8 @@ class DRLBot:
         q = get_output(dqn)
         # Only q for the chosen actions is updated more or less according to following formula:
         # target Q(s,a,t) = r + gamma * max Q(s2,_,t+1)
-        target_q = tensor.set_subtensor(q[tensor.arange(q.shape[0]), a], r + self.discount_factor * nonterminal * q2)
-        loss = squared_error(q, target_q).mean()
+        target_q = tensor.set_subtensor(q[tensor.arange(q.shape[0]), a], r)# + self.discount_factor * nonterminal * q2)
+        loss = categorical_crossentropy(q, target_q).mean()
 
         # Updates the parameters according to the computed gradient using rmsprop.
         params = get_all_params(dqn, trainable=True)
@@ -298,14 +305,16 @@ class DRLBot:
 
         # Compiles theano functions
         print "Compiling the network ..."
-        function_learn = theano.function([s1, q2, a, r, nonterminal], loss, updates=updates, name="learn_fn")
+        function_learn = theano.function([s1, a, r], loss, updates=updates, name="learn_fn")
         function_get_q_values = theano.function([s1], q, name="eval_fn")
         function_get_best_action = theano.function([s1], tensor.argmax(q), name="test_fn")
+        function_get_good_action = theano.function([s1], tensor.argmax(q), name="test_fn")
+        #function_get_good_action = theano.function([s1], tensor.argmax(tensor.raw_random.multinomial(1,q)), name="test_fn")
         print "Network compiled."
 
         # Returns Theano objects for the net and functions.
         # We wouldn't need the net anymore but it is nice to save your model.
-        return dqn, function_learn, function_get_q_values, function_get_best_action
+        return dqn, function_learn, function_get_q_values, function_get_best_action, function_get_good_action
  
     # Makes an action according to epsilon greedy policy and performs a single backpropagation on the network.
     def perform_play_step(self):
@@ -334,25 +343,33 @@ class DRLBot:
     # Makes an action according to epsilon greedy policy and performs a single backpropagation on the network.
     def perform_play_step_no_storage(self):
         # Checks the state and downsamples it.
-        curr_state = self.get_state_f()
-        if curr_state is None:
-            return -1
-        s1 = self.convert(curr_state)
+        s1 = self.get_state_f()
+        if s1 is not None:
+            s1 = self.convert(s1)
 
-
+        # With probability epsilon makes a random action.
+        if random() <= self.epsilon:
+            a = randint(0, self.available_actions_num - 1)
+        else:
             # Chooses the best action according to the network.
-        a = self.get_best_action(s1.reshape([1, -1, self.channels, self.downsampled_y, self.downsampled_x]))
+            a = self.get_best_action(self.memory.get_current_episode(max_time_steps = self.max_time_steps))
         reward = self.make_action_f(a)
         reward *= self.reward_scale
-        curr_state = self.get_state_f()
+        #curr_state = self.get_state_f()
+        #if curr_state is None:
+        #    s2 = None
+        #else:
+        #    s2 = self.convert(curr_state)
+        # Remember the transition that was just experienced.
+        self.memory.add_transition(s1, a, reward)
         return reward/self.reward_scale
     
     # Makes an action according to epsilon greedy policy and performs a single backpropagation on the network.
     def perform_learning_step(self):
         if self.memory.size > self.max_time_steps:
             s1, s2, a, reward, nonterminal = self.memory.get_random_episode_section_batch()
-            q2 = np.max(self.get_q_values(s2.reshape([self.batch_size, self.max_time_steps, self.channels, self.downsampled_y, self.downsampled_x])), axis=1)
-            loss = self.learn(s1.reshape([self.batch_size, self.max_time_steps, self.channels, self.downsampled_y, self.downsampled_x]), q2, a, reward, nonterminal)
+            #q2 = np.max(self.get_q_values(s2.reshape([self.batch_size, self.max_time_steps, self.channels, self.downsampled_y, self.downsampled_x])), axis=1)
+            loss = self.learn(s1.reshape([self.batch_size, self.max_time_steps, self.channels, self.downsampled_y, self.downsampled_x]), a, reward)
         else:
             loss = 0
         return loss
