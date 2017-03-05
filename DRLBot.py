@@ -86,9 +86,11 @@ class RecurrentMemory:
             #now that it is the end of an episode, we must go back and recalculate rewards with discount factor
             self.nonterminal[self.oldest_index] = False
             reverse_index = (self.oldest_index + self.capacity - 1)%self.capacity
-            while reverse_index != self.current_episode_start:
+            #while reverse_index != self.current_episode_start:
+            for i in xrange(self.current_episode_length):
                 self.r[reverse_index] += self.discount_factor*self.r[(reverse_index+1)%self.capacity]
                 reverse_index = (reverse_index + self.capacity - 1)%self.capacity
+            self.current_episode_length = 0
         else:
             self.nonterminal[self.oldest_index] = True
         
@@ -169,7 +171,7 @@ class DRLBot:
     end_epsilon = float(0.1)
     epsilon = start_epsilon
     epsilon = 1.0
-    static_epsilon_steps = 0
+    static_epsilon_steps = 5000
     epsilon_decay_steps = 20000
     epsilon_decay_stride = (start_epsilon - end_epsilon) / epsilon_decay_steps
 
